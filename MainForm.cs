@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
+using System.IO;
 using System.Drawing;
 using System.Globalization;
 using System.Linq;
@@ -56,7 +57,7 @@ namespace bluetooth_rssi_test_tools
         }
 
         // 统一处理 low/high 的文本变化并保持下限 <= 上限
-        private void TbBound_TextChanged(object sender, EventArgs e) 
+        private async void TbBound_TextChanged(object sender, EventArgs e) 
         {
             if (_suppressBoundChange) return;
             _suppressBoundChange = true;
@@ -79,9 +80,11 @@ namespace bluetooth_rssi_test_tools
                     if (edited == tb_low) 
                     {
                         tb_low.Clear();
+                        await Task.Delay(3000);
                     } else
                     {
                         tb_high.Clear();
+                        await Task.Delay(3000);
                     }
                 }
             }
@@ -189,7 +192,7 @@ namespace bluetooth_rssi_test_tools
                     if (samples.Count == 0)
                     {
                         item.Result = "未发现设备";
-                        Log($"[结果] [{targets}] 为发现设备");
+                        Log($"未发现 [{item.Device}] 设备");
                         continue;
                     }
 
@@ -202,6 +205,22 @@ namespace bluetooth_rssi_test_tools
                         item.AVG == string.Empty ? "-" : item.AVG,
                         item.Result));
 
+                    // 将结果统一为大写并根据值设置颜色
+                    var resultText = (item.Result ?? string.Empty).ToUpperInvariant();
+                    tb_Text_Result.Text = resultText;
+
+                    if (resultText == "PASS")
+                    {
+                        tb_Text_Result.ForeColor = Color.Green;
+                    }
+                    else if (resultText == "FAIL")
+                    {
+                        tb_Text_Result.ForeColor = Color.Red;
+                    }
+                    else
+                    {
+                        tb_Text_Result.ForeColor = SystemColors.WindowText; // 恢复默认颜色
+                    }
                 }
                 Log("==== 全部测试完成 ====");
             }
@@ -229,14 +248,60 @@ namespace bluetooth_rssi_test_tools
             Log("操作人员主动取消测试");
         }
 
+        // 字段转义: 含逗号/引号/换行时加引号包裹, 内部引号翻倍
+        private string CsvCell(object value)
+        {
+            string s = value == null ? string.Empty : value.ToString();
+            if (s.Contains(",") || s.Contains("\"") || s.Contains("\r") || s.Contains("\n"))
+            {
+                s = "\"" + s.Replace("\"", "\"\"") + "\"";
+            }
+            return s;
+        }
+
         private void btn_ex_result_Click(object sender, EventArgs e)
         {
+            if (_items == null || _items.Count == 0) 
+            { 
+                Log("[提示] 无内容可保存"); 
+                return; 
+            }
+            using (var dlg = new SaveFileDialog())
+            {
+                dlg.Filter = "CSV 文件 (*.csv)|*.csv|所有文件 (*.*)|*.*";
+                dlg.FileName = string.Format("BLE检测结果_{0:yyyyMMdd_HHmmss}.csv", DateTime.Now);
+                dlg.Title = "保存测试结果";
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
+                var sb = new StringBuilder();
+                sb.AppendLine("是否测试,设备名称,信号强度,平均值,测试结果");
+                foreach (TestItem item in _items)
+                {
+                    sb.AppendLine(string.Join(",",
+                        item.TestCheck ? "是" : "否",
+                        CsvCell(item.Device),
+                        CsvCell(item.RSSI),
+                        CsvCell(item.AVG),
+                        CsvCell(item.Result)));
+                }
+                File.WriteAllText(dlg.FileName, sb.ToString(), new  UTF8Encoding(true));
+                Log("[保存] " + dlg.FileName);
+            }
         }
 
         private void btn_ex_logs_Click(object sender, EventArgs e)
         {
+            // 导出日志到文本
+            if (string.IsNullOrEmpty(tb_logs.Text)) { Log("日志为空, 无需导出"); return; }
+            using (var dlg = new SaveFileDialog()) 
+            {
+                dlg.Filter = "文本文件(*.txt)|*.txt";
+                dlg.FileName = string.Format("BLE检测日志_{0:yyyyMMdd_HHmmss}.txt", DateTime.Now);
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
+                File.WriteAllText(dlg.FileName, tb_logs.Text, new UTF8Encoding(true));
+                Log("[导出日志] " + dlg.FileName);
+            }
         }
 
         private void btn_clear_logs_Click(object sender, EventArgs e)

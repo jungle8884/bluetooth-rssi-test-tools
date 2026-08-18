@@ -202,7 +202,6 @@
             this.tb_device_name.Name = "tb_device_name";
             this.tb_device_name.Size = new System.Drawing.Size(1145, 25);
             this.tb_device_name.TabIndex = 0;
-            this.tb_device_name.Text = "扫码枪扫描输入到此处";
             this.tb_device_name.TextAlign = System.Windows.Forms.HorizontalAlignment.Center;
             this.tb_device_name.TextChanged += new System.EventHandler(this.tb_device_name_TextChanged);
             this.tb_device_name.KeyDown += new System.Windows.Forms.KeyEventHandler(this.tb_device_name_KeyDown);
@@ -244,13 +243,13 @@
             // tb_Text_Result
             // 
             this.tb_Text_Result.Font = new System.Drawing.Font("宋体", 12F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(134)));
-            this.tb_Text_Result.Location = new System.Drawing.Point(1163, 62);
+            this.tb_Text_Result.Location = new System.Drawing.Point(1163, 102);
             this.tb_Text_Result.Multiline = true;
             this.tb_Text_Result.Name = "tb_Text_Result";
             this.tb_Text_Result.ReadOnly = true;
-            this.tb_Text_Result.Size = new System.Drawing.Size(285, 90);
+            this.tb_Text_Result.Size = new System.Drawing.Size(285, 59);
             this.tb_Text_Result.TabIndex = 3;
-            this.tb_Text_Result.Text = "测试结果: \r\n\r\n未测试";
+            this.tb_Text_Result.Text = "通过次数/总次数";
             this.tb_Text_Result.TextAlign = System.Windows.Forms.HorizontalAlignment.Center;
             // 
             // btn_clear_logs
