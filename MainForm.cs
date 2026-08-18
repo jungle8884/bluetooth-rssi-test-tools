@@ -32,8 +32,8 @@ namespace bluetooth_rssi_test_tools
 
         private void InitUi()
         {
-            tb_high.Text = "-70";
-            tb_low.Text = "-40";
+            tb_high.Text = "-10";
+            tb_low.Text = "-90";
             tb_sample.Text = "10";
 
             _items = new BindingList<TestItem>();
@@ -181,24 +181,27 @@ namespace bluetooth_rssi_test_tools
                     item.AVG = string.Empty;
                     item.Result = "测试中";
 
-                    double? avg = await BleHelper.SampleRssiAsync(
-                        item.Device, sampleCount, 12,
-                        rssi => BeginInvoke(new Action(() => { item.RSSI = rssi.ToString(); })),
-                        _cts.Token);
+                    List<int> samples = await BleHelper.SampleRssiAsync(
+                        item.Device, sampleCount, 12, _cts.Token,
+                        rssi => BeginInvoke(new Action(() => { item.RSSI = rssi.ToString(); })));
 
-                    if (avg == null)
+                    if (_cts.IsCancellationRequested) break;
+                    if (samples.Count == 0)
                     {
                         item.Result = "未发现设备";
+                        Log($"[结果] [{targets}] 为发现设备");
+                        continue;
                     }
-                    else
-                    {
-                        item.AVG = avg.Value.ToString("0.0");
-                        item.Result = (avg.Value >= low && avg.Value <= high) ? "合格" : "不合格";
-                    }
-                    Log(string.Format("[{0}] {1}->{2}",
+
+                    double avg = BleHelper.TrimMean(samples);
+                    bool ok = avg >= low && avg <= high;
+                    item.AVG = avg.ToString("F1");
+                    item.Result = ok ? "PASS" : "FAIL";
+                    Log(string.Format("[{0}] {1} → {2}",
                         item.Device,
                         item.AVG == string.Empty ? "-" : item.AVG,
                         item.Result));
+
                 }
                 Log("==== 全部测试完成 ====");
             }
@@ -214,7 +217,7 @@ namespace bluetooth_rssi_test_tools
                     _cts = null;
                 }
                 btn_Start.Enabled = true;
-                Text = "BLE RSSI 检测工具";
+                Text = "BLE RSSI 检测结束";
             }
 
         }

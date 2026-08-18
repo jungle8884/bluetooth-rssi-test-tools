@@ -37,54 +37,61 @@ namespace bluetooth_rssi_test_tools
             return sb.ToString();
         }
 
+        private static bool Matches(string name, string mac, string target, string targetNorm)
+        {
+            if (target.Length == 0) return false;
+            if (!string.IsNullOrEmpty(name) && (name == target || Normalize(name) == targetNorm)) return true;
+            if (!string.IsNullOrEmpty(mac) && (mac == target || Normalize(mac) == targetNorm)) return true;
+            return false;
+        }
+
         // 去掉最大最小值后取均值, 抗RSSI瞬时尖脉冲
-        private static double TrimMean(List<int> values)
+        public static double TrimMean(List<int> values)
         {
             var s = values.OrderBy(x => x).ToList();
             return s.Skip(1).Take(s.Count - 2).Average();
         }
 
-        public static async Task<double?> SampleRssiAsync(
+        /// <summary>
+        /// 采集目标设备 sampleCount 个 RSSI 样本（去抖/抗尖脉冲在上层做 trim_mean）。
+        /// 匹配规则: 设备名 == target 或 MAC == target（忽略冒号横线）。
+        /// onSample 在 watcher 后台线程回调，UI 更新请自行 Invoke。
+        /// </summary>
+        public static async Task<List<int>> SampleRssiAsync(
             string target, int sampleCount, int timeoutSeconds, 
-            Action<int> onSample, CancellationToken ct)
+            CancellationToken ct, Action<int> onSample = null)
         {
             var samples = new List<int>();
             var done = new TaskCompletionSource<bool>();
-            BluetoothLEAdvertisementWatcher watcher = null;
+            string targetNorm = Normalize(target);
+            BluetoothLEAdvertisementWatcher watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
 
+            watcher.Received += (s, args) =>
+            {
+                string name = args.Advertisement.LocalName;
+                string mac = MacFromAddress(args.BluetoothAddress);
+                if (!Matches(name, mac, target, targetNorm)) return;
+                lock (samples)
+                {
+                    if (samples.Count < sampleCount)
+                    {
+                        samples.Add(args.RawSignalStrengthInDBm);
+                        if (onSample != null) onSample(args.RawSignalStrengthInDBm);
+                    }
+                    if (samples.Count >= sampleCount) done.TrySetResult(true);
+                }
+            };
+
+            watcher.Start();
             try
             {
-                watcher = new BluetoothLEAdvertisementWatcher
-                {
-                    ScanningMode = BluetoothLEScanningMode.Active // Active 才能拿到广播名
-                };
-
-                watcher.Received += (s, args) =>
-                {
-                    string name = args.Advertisement.LocalName ?? "";
-                    string mac = MacFromAddress(args.BluetoothAddress);
-                    // 宽松匹配: 按名称或按MAC(去冒号横线后比较)
-                    bool hit = string.Equals(name, target, StringComparison.OrdinalIgnoreCase)
-                        || Normalize(mac) == Normalize(target);
-                    if (!hit) return;
-
-                    samples.Add(args.RawSignalStrengthInDBm);
-                    if (onSample != null) onSample(args.RawSignalStrengthInDBm);
-                    if (samples.Count >= sampleCount) done.TrySetResult(true);
-                };
-
-                watcher.Start();
-
-                // 竞速: "采够了" 和 "超时" 谁先到谁赢 --- 产线绝不等一个不存在的设备
-                Task finished = await Task.WhenAny(done.Task, Task.Delay(timeoutSeconds * 1000, ct));
-                if (finished != done.Task || samples.Count == 0) return null;
-
-                return TrimMean(samples);
+                await Task.WhenAny(done.Task, Task.Delay(timeoutSeconds * 1000, ct));
             }
             finally
             {
                 if (watcher != null) watcher.Stop(); // 每设备用完即停, 下个设备重开
             }
+            return samples;
         }
     }
 }
