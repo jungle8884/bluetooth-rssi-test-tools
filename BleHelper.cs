@@ -170,11 +170,13 @@ namespace bluetooth_rssi_test_tools
         /// 采集目标设备 sampleCount 个 RSSI 样本（去抖/抗尖脉冲在上层做 trim_mean）。
         /// 匹配规则: 设备名 == target 或 MAC == target 或 艺云广播SN匹配 target(忽略大小写/冒号/横线)。
         /// onSample 在 watcher 后台线程回调，UI 更新请自行 Invoke。
+        /// onTrace 是采样级详细追踪(锁定MAC/逐包RSSI/结束统计), 只写后台日志, 不刷界面。
         /// </summary>
         public static async Task<List<int>> SampleRssiAsync(
-            string target, int sampleCount, int timeoutSeconds, 
-            CancellationToken ct, Action<int> onSample = null)
+            string target, int sampleCount, int timeoutSeconds,
+            CancellationToken ct, Action<int> onSample = null, Action<string> onTrace = null)
         {
+            void Trace(string msg) => onTrace?.Invoke(string.Format("[{0}] {1}", target, msg));
             var samples = new List<int>();
             /**
                 创建了一个"未完成的 Task"，通过 done.Task 可以拿到它
@@ -210,17 +212,31 @@ namespace bluetooth_rssi_test_tools
              */
             BluetoothLEAdvertisementWatcher watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
 
+            // MAC 锁: 第一次匹配成功后锁定该设备的蓝牙地址, 后续只收它发的包。
+            // 防的场景: 产线上多台待测设备同时广播, 若两台广播了相同 SN(如固件未烧录用默认值),
+            // 不锁定的话两台的 RSSI 会混进同一次采样, 均值失真。
+            ulong lockedMac = 0; // 0 = 尚未锁定
+
             watcher.Received += (s, args) =>
             {
                 if (!Matches(args, target, targetNorm)) return;
                 lock (samples)
                 {
+                    if (lockedMac == 0)
+                    {
+                        lockedMac = args.BluetoothAddress; // 首个匹配的设备 → 锁定
+                        Trace("匹配锁定 MAC " + MacFromAddress(lockedMac) +
+                            " (广播名: " + (args.Advertisement.LocalName ?? "(空)") + ")");
+                    }
+                    if (args.BluetoothAddress != lockedMac) return;       // 其他设备(即使SN相同) → 丢弃
                     if (samples.Count < sampleCount)
                     {
                         samples.Add(args.RawSignalStrengthInDBm);
+                        Trace(string.Format("采样 RSSI={0}dBm ({1}/{2})",
+                            args.RawSignalStrengthInDBm, samples.Count, sampleCount));
                         if (onSample != null) onSample(args.RawSignalStrengthInDBm);
                     }
-                    if (samples.Count >= sampleCount) 
+                    if (samples.Count >= sampleCount)
                         done.TrySetResult(true); // TaskCompletionSource-③ 后台回调采够了 → 宣布完成
                 }
             };
@@ -243,6 +259,8 @@ namespace bluetooth_rssi_test_tools
             {
                 if (watcher != null) watcher.Stop(); // 每设备用完即停, 下个设备重开
             }
+            Trace(string.Format("采样结束: 采到 {0}/{1} 个样本" + (samples.Count == 0 ? " (未发现设备或超时)" : ""),
+                samples.Count, sampleCount));
             return samples;
         }
     }

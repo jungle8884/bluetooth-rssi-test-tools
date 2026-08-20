@@ -29,6 +29,14 @@ namespace bluetooth_rssi_test_tools
         private void MainForm_Load(object sender, EventArgs e)
         {
             InitUi();
+            FileLogger.Write(string.Format("==== 程序启动 (版本 {0}) ====",
+                System.Reflection.Assembly.GetExecutingAssembly().GetName().Version));
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            FileLogger.Write("==== 程序退出 ====");
+            base.OnFormClosed(e);
         }
 
         private void InitUi()
@@ -172,6 +180,8 @@ namespace bluetooth_rssi_test_tools
 
             try
             {
+                Log(string.Format("开始测试批次: {0} 台设备, 阈值[{1}, {2}] dBm, 每台采 {3} 个样本",
+                    targets.Count, low, high, sampleCount));
                 int done = 0;
                 foreach (TestItem item in targets) // 串行测试
                 {
@@ -185,8 +195,9 @@ namespace bluetooth_rssi_test_tools
                     item.Result = "测试中";
 
                     List<int> samples = await BleHelper.SampleRssiAsync(
-                        item.Device, sampleCount, 12, _cts.Token,
-                        rssi => BeginInvoke(new Action(() => { item.RSSI = rssi.ToString(); })));
+                        item.Device, sampleCount, 30, _cts.Token,
+                        rssi => BeginInvoke(new Action(() => { item.RSSI = rssi.ToString(); })),
+                        FileLogger.Write); // 采样级详细追踪直接写文件(不刷界面日志)
 
                     if (_cts.IsCancellationRequested) break;
                     if (samples.Count == 0)
@@ -369,6 +380,9 @@ namespace bluetooth_rssi_test_tools
                 return;
             }
             tb_logs.AppendText(string.Format("[{0:HH:mm:ss}] {1}\r\n", DateTime.Now, msg));
+
+            // 同步写入后台日志文件(比 UI 界面更详细的时间戳, 且清空界面日志不影响文件)
+            FileLogger.Write(msg);
 
             // 日志上限保护: 超过 maxChars 时只保留尾部 keepChars, 防止无限膨胀
             const int maxChars = 200_000;
