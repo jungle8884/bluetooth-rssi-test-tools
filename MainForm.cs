@@ -154,7 +154,7 @@ namespace bluetooth_rssi_test_tools
         {
             // 参数校验
             if (!TryParseRssi(tb_low.Text, out int low)) { Log("下限不合法"); return; }
-            if (!TryParseRssi(tb_high.Text, out int high)) { Log("上限不合法"); return; }
+            if (!TryParseRssi(tb_high.Text, out int high)) { Log("上限不合法"); return; } 
             if (low > high) { Log("下限不能大于上限"); return; }
             if (!int.TryParse(tb_sample.Text, out int sampleCount) || sampleCount < 3 || sampleCount > 50) 
             {
