@@ -180,57 +180,49 @@ namespace bluetooth_rssi_test_tools
 
             try
             {
-                Log(string.Format("开始测试批次: {0} 台设备, 阈值[{1}, {2}] dBm, 每台采 {3} 个样本",
+                Log(string.Format("开始测试批次: {0} 台设备(并行), 阈值[{1}, {2}] dBm, 每台采 {3} 个样本",
                     targets.Count, low, high, sampleCount));
-                int done = 0;
-                foreach (TestItem item in targets) // 串行测试
-                {
-                    if (_cts.IsCancellationRequested) { Log("测试已取消"); break; }
-                    done++;
-                    Text = string.Format("测试中 ({0}/{1}:{2})", done, targets.Count, item.Device);
-                    Log("开始测试: " + item.Device);
 
+                foreach (TestItem item in targets)
+                {
                     item.RSSI = string.Empty;
                     item.AVG = string.Empty;
                     item.Result = "测试中";
+                }
+                Text = string.Format("并行测试中 ({0} 台)...", targets.Count);
 
-                    List<int> samples = await BleHelper.SampleRssiAsync(
-                        item.Device, sampleCount, 30, _cts.Token,
-                        rssi => BeginInvoke(new Action(() => { item.RSSI = rssi.ToString(); })),
-                        FileLogger.Write); // 采样级详细追踪直接写文件(不刷界面日志)
+                // target(设备号) → 表格行对象, 后台回调里按 target 反查更新对应行
+                var itemMap = targets.ToDictionary(x => x.Device, x => x, StringComparer.OrdinalIgnoreCase);
 
-                    if (_cts.IsCancellationRequested) break;
-                    if (samples.Count == 0)
+                // 单 watcher + 分发: 所有设备同时采样, 总耗时≈最慢一台
+                Dictionary<string, List<int>> results = await BleHelper.SampleRssiBatchAsync(
+                    targets.Select(x => x.Device).ToList(), sampleCount, 30, _cts.Token,
+                    (target, rssi) => BeginInvoke(new Action(() =>
                     {
-                        item.Result = "未发现设备";
-                        Log($"未发现 [{item.Device}] 设备");
-                        continue;
-                    }
-
-                    double avg = BleHelper.TrimMean(samples);
-                    bool ok = avg >= low && avg <= high;
-                    item.AVG = avg.ToString("F1");
-                    item.Result = ok ? "PASS" : "FAIL";
-                    Log(string.Format("[{0}] {1} → {2}",
-                        item.Device,
-                        item.AVG == string.Empty ? "-" : item.AVG,
-                        item.Result));
-
-                    // 将结果统一为大写并根据值设置颜色
-                    var resultText = (item.Result ?? string.Empty).ToUpperInvariant();
-                    tb_Text_Result.Text = resultText;
-
-                    if (resultText == "PASS")
+                        TestItem it;
+                        if (itemMap.TryGetValue(target, out it)) it.RSSI = rssi.ToString();
+                    })),
+                    FileLogger.Write, // 采样级详细追踪直接写文件(不刷界面日志)
+                    (target, samples) => BeginInvoke(new Action(() =>
                     {
-                        tb_Text_Result.ForeColor = Color.Green;
-                    }
-                    else if (resultText == "FAIL")
+                        TestItem it;
+                        if (itemMap.TryGetValue(target, out it))
+                            EvaluateItem(it, samples, low, high); // 采够一台立即出结果
+                    })));
+
+                if (_cts.IsCancellationRequested)
+                {
+                    Log("测试已取消, 已采样本不计入结果");
+                }
+                else
+                {
+                    // 超时没采够的设备, 用实际样本数收尾评估(采够的已被上面的回调评估过)
+                    foreach (TestItem item in targets)
                     {
-                        tb_Text_Result.ForeColor = Color.Red;
-                    }
-                    else
-                    {
-                        tb_Text_Result.ForeColor = SystemColors.WindowText; // 恢复默认颜色
+                        if (item.Result != "测试中") continue;
+                        List<int> samples;
+                        results.TryGetValue(item.Device, out samples);
+                        EvaluateItem(item, samples, low, high);
                     }
                 }
                 Log("==== 全部测试完成 ====");
@@ -250,6 +242,31 @@ namespace bluetooth_rssi_test_tools
                 Text = "BLE RSSI 检测结束";
             }
 
+        }
+
+        /// <summary>
+        /// 评估单台设备测试结果(必须在 UI 线程调用):
+        /// 0 个样本 = 未发现设备; 否则 TrimMean 后按阈值判 PASS/FAIL。
+        /// 并行测试时每台采够样本立即调用一次(不用等整批结束), 超时的设备批量结束时兜底调用。
+        /// </summary>
+        private void EvaluateItem(TestItem item, List<int> samples, int low, int high)
+        {
+            if (item == null) return;
+            if (samples == null || samples.Count == 0)
+            {
+                item.Result = "未发现设备";
+                Log(string.Format("未发现 [{0}] 设备", item.Device));
+                return;
+            }
+
+            double avg = BleHelper.TrimMean(samples);
+            bool ok = avg >= low && avg <= high;
+            item.AVG = avg.ToString("F1");
+            item.Result = ok ? "PASS" : "FAIL";
+            Log(string.Format("[{0}] {1} → {2}", item.Device, item.AVG, item.Result));
+
+            tb_Text_Result.ForeColor = ok ? Color.Green : Color.Red;
+            tb_Text_Result.Text = ok ? "PASS" : "FAIL";
         }
 
         private void btn_cancel_Click(object sender, EventArgs e)

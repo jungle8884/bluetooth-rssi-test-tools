@@ -129,9 +129,14 @@ namespace bluetooth_rssi_test_tools
         /// <returns></returns>
         private static bool SnMatches(string targetNorm, string advSn)
         {
-            string b = Normalize(advSn);
-            if (targetNorm.Length == 0 || b.Length == 0) return false;
-            return targetNorm == b || targetNorm.EndsWith(b) || b.EndsWith(targetNorm);
+            return SnMatchesNorm(targetNorm, Normalize(advSn));
+        }
+
+        /// <summary>SN 匹配(输入均已归一化, 供批量分发复用)</summary>
+        private static bool SnMatchesNorm(string targetNorm, string snNorm)
+        {
+            if (targetNorm.Length == 0 || snNorm.Length == 0) return false;
+            return targetNorm == snNorm || targetNorm.EndsWith(snNorm) || snNorm.EndsWith(targetNorm);
         }
 
         /// <summary>
@@ -263,5 +268,137 @@ namespace bluetooth_rssi_test_tools
                 samples.Count, sampleCount));
             return samples;
         }
+
+        #region 并行批量采样: 单 watcher + 分发表
+
+        /// <summary>
+        /// 批量并行采样的内部状态: 每个目标设备一份, 各自持有样本/MAC锁/完成信号,
+        /// 互不干扰 → 多台设备同时采样, 相同 SN 也不会串台(MAC锁按目标独立生效)。
+        /// </summary>
+        private sealed class TargetState
+        {
+            public string Target;                                    // 原始输入(SN/名称/MAC)
+            public string TargetNorm;                                // 归一化输入
+            public readonly List<int> Samples = new List<int>();     // 已采样本
+            public ulong LockedMac;                                  // 0 = 尚未锁定
+            public readonly TaskCompletionSource<bool> Done = new TaskCompletionSource<bool>();
+        }
+
+        /// <summary>
+        /// 并行批量采样(单 watcher + 分发): 一个 watcher 收所有广播包, 每包只解析一次,
+        /// 按 SN/名称/MAC 路由到各目标的采样队列 → 所有设备同时采样, 总耗时 ≈ 最慢那台,
+        /// 而不是旧版串行的"各台之和"。实测基准: 设备广播约 1.1 包/秒, 采 10 个样本约 9 秒,
+        /// 无论几台设备, 整批都只要 ~10 秒。
+        ///
+        /// 为什么比"每台一个 watcher"好:
+        ///   1. 没有 watcher 反复 Start/Stop 的平台启动延迟(旧版偶发"未发现"的元凶)
+        ///   2. 每个包只做一次厂商数据解析, 开销随设备数线性而不是平方级增长
+        ///   3. 首包等待时间和 Python(bleak 持续监听) 同级, 不会再出现等 1 分多钟的情况
+        /// </summary>
+        /// <param name="targets">目标列表(SN/设备名/MAC 任意混合, 自动去重)</param>
+        /// <param name="sampleCount">每台采样个数</param>
+        /// <param name="timeoutSeconds">整批超时(秒), 到点没采够的设备按实际样本数返回</param>
+        /// <param name="ct">取消令牌</param>
+        /// <param name="onSample">每采到一包回调(target, rssi), watcher 后台线程触发</param>
+        /// <param name="onTrace">采样级追踪日志, watcher 后台线程触发</param>
+        /// <param name="onTargetDone">某台采够样本立即回调(target, 样本快照), 不必等整批结束</param>
+        /// <returns>target → 样本列表(顺序与 targets 一致, 0 个样本=未发现)</returns>
+        public static async Task<Dictionary<string, List<int>>> SampleRssiBatchAsync(
+            List<string> targets, int sampleCount, int timeoutSeconds,
+            CancellationToken ct, Action<string, int> onSample = null,
+            Action<string> onTrace = null, Action<string, List<int>> onTargetDone = null)
+        {
+            var results = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
+            if (targets == null) return results;
+
+            // 去重 + 建分发表(每台设备独立状态)
+            var states = targets
+                .Where(t => !string.IsNullOrEmpty(t))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Select(t => new TargetState { Target = t, TargetNorm = Normalize(t) })
+                .ToList();
+            if (states.Count == 0) return results;
+
+            var gate = new object(); // 分发表总锁(与单台版 lock(samples) 同思路)
+
+            BluetoothLEAdvertisementWatcher watcher =
+                new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
+
+            watcher.Received += (s, args) =>
+            {
+                // ★ 每个广播包只解析一次, 所有目标共享 —— 这是批量版的核心优化:
+                //   N 台设备不再是每台各自解析一遍厂商数据, 而是每包 1 次
+                string name = args.Advertisement.LocalName;
+                string nameNorm = string.IsNullOrEmpty(name) ? null : Normalize(name);
+                string mac = MacFromAddress(args.BluetoothAddress);
+                string macNorm = Normalize(mac);
+                string snNorm = null;
+                if (TryParseYiyunSn(args, out string sn, out _)) snNorm = Normalize(sn);
+
+                foreach (TargetState st in states)
+                {
+                    // 匹配规则与单台版完全一致: 名称/MAC/SN 三选一
+                    bool match =
+                        (nameNorm != null && (name == st.Target || nameNorm == st.TargetNorm)) ||
+                        mac == st.Target || macNorm == st.TargetNorm ||
+                        (snNorm != null && SnMatchesNorm(st.TargetNorm, snNorm));
+                    if (!match) continue;
+
+                    lock (gate)
+                    {
+                        if (st.LockedMac == 0)
+                        {
+                            st.LockedMac = args.BluetoothAddress;
+                            onTrace?.Invoke(string.Format("[{0}] 匹配锁定 MAC {1} (广播名: {2})",
+                                st.Target, mac, name ?? "(空)"));
+                        }
+                        if (args.BluetoothAddress != st.LockedMac) continue; // 同SN其他设备 → 丢弃
+
+                        if (st.Samples.Count < sampleCount)
+                        {
+                            st.Samples.Add(args.RawSignalStrengthInDBm);
+                            onTrace?.Invoke(string.Format("[{0}] 采样 RSSI={1}dBm ({2}/{3})",
+                                st.Target, args.RawSignalStrengthInDBm, st.Samples.Count, sampleCount));
+                            onSample?.Invoke(st.Target, args.RawSignalStrengthInDBm);
+                        }
+                        if (st.Samples.Count >= sampleCount && !st.Done.Task.IsCompleted)
+                        {
+                            st.Done.TrySetResult(true);
+                            onTrace?.Invoke(string.Format("[{0}] 采样结束: 采到 {1}/{2}",
+                                st.Target, st.Samples.Count, sampleCount));
+                            // 传快照, 避免上层遍历时后台线程还在改列表
+                            onTargetDone?.Invoke(st.Target, st.Samples.ToList());
+                        }
+                    }
+                }
+            };
+
+            watcher.Start();
+            try
+            {
+                // 整批完成 = 所有设备各自采够; 有任何一台没采够就等整批超时/取消
+                Task allDone = Task.WhenAll(states.Select(x => x.Done.Task).ToArray());
+                try
+                {
+                    await Task.WhenAny(allDone, Task.Delay(timeoutSeconds * 1000, ct));
+                }
+                catch (TaskCanceledException) { } // 取消按超时处理: 已采多少算多少
+            }
+            finally
+            {
+                watcher.Stop(); // 整批只用一个 watcher, 没有反复启停
+            }
+
+            foreach (TargetState st in states)
+            {
+                results[st.Target] = st.Samples;
+                if (st.Samples.Count == 0)
+                    onTrace?.Invoke(string.Format("[{0}] 采样结束: 0/{1} (未发现设备或超时)",
+                        st.Target, sampleCount));
+            }
+            return results;
+        }
+
+        #endregion
     }
 }
